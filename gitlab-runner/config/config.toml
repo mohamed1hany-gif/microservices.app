@@ -1,0 +1,22 @@
+log_level = "warning"
+
+[[runners]]
+  name = "gitlab-runner-1"
+  url = "https://gitlab.com"
+  token = "glrt-TwlaRUwA7OjVjCgHPSc-mG86MQpwOjE1eDNiegp0OjMKdTpncngzaBg.01.1j1vhmjyh"
+  executor = "docker"
+  limit = 1
+  output_limit = 8192
+
+  [runners.docker]
+    tls_verify = false
+    image = "docker:latest"
+    pull_policy = "always"
+    privileged = true
+    disable_cache = false
+    shm_size = 512000000
+    volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]
+
+  [runners.cache]
+    Insecure = false
+

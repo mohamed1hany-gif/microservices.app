@@ -1,0 +1,181 @@
+variables:
+  DOCKER_IMAGE_BACKEND: "mohamed7any/moo"
+  DOCKER_IMAGE_FRONTEND: "mohamed7any/moo"
+  DOCKER_TAG: "${CI_COMMIT_SHA}"
+
+stages:
+  - notify
+  - build
+  - lint
+  - test
+  - dockerization
+  - security
+  - deploy
+  - cleanup
+
+notify:
+  stage: notify
+  image: curlimages/curl:latest
+  script:
+    - >
+      curl -X POST -H 'Content-type: application/json'
+      --data "{\"text\":\"🔔 *Notify* stage started for branch *$CI_COMMIT_REF_NAME* in project *$CI_PROJECT_NAME*.\n📦 Commit: $CI_COMMIT_SHORT_SHA\"}"
+      https://hooks.slack.com/services/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
+
+build_frontend:
+  stage: build
+  image: node:20
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - frontend/node_modules/
+  script:
+    - cd frontend
+    - npm install
+    - npm run build
+  artifacts:
+    paths:
+      - frontend/build/
+    expire_in: 1 hour
+
+build_backend:
+  stage: build
+  image: python:3.10
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - backend/.venv/
+  script:
+    - python -m venv backend/.venv
+    - source backend/.venv/bin/activate
+    - pip install -r backend/requirements.txt
+
+lint_backend:
+  stage: lint
+  image: python:3.11
+  script:
+    - pip install flake8 black
+    - black backend
+    - cd backend && flake8 . || true
+  needs:
+    - build_backend
+
+lint_frontend:
+  stage: lint
+  image: node:20
+  cache:
+    paths:
+      - frontend/node_modules/
+  script:
+    - cd frontend
+    - npm install
+    - npm run lint || true
+
+test_frontend:
+  stage: test
+  image: node:20
+  cache:
+    paths:
+      - frontend/node_modules/
+  script:
+    - cd frontend
+    - npm install
+    - npm test || true
+  needs:
+    - build_frontend
+
+test_backend:
+  stage: test
+  image: python:3.11
+  script:
+    - cd backend
+    - pip install pytest
+    - pytest || true
+  needs:
+    - build_backend
+
+docker-build:
+  stage: dockerization
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "$DOCKERHUB_TOKEN" | docker login -u "mohamed7any" --password-stdin
+  script:
+    - docker build -t $DOCKER_IMAGE_BACKEND:$DOCKER_TAG ./backend
+    - docker build -t $DOCKER_IMAGE_FRONTEND:$DOCKER_TAG ./frontend
+    - docker push $DOCKER_IMAGE_BACKEND:$DOCKER_TAG
+    - docker push $DOCKER_IMAGE_FRONTEND:$DOCKER_TAG
+  needs:
+    - build_backend
+    - build_frontend
+    - lint_backend
+    - lint_frontend
+    - test_backend
+    - test_frontend
+
+security_backend:
+  stage: security
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - apk add --no-cache curl
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+    - echo "$DOCKERHUB_TOKEN" | docker login -u mohamed7any --password-stdin
+  script:
+    - docker pull $DOCKER_IMAGE_BACKEND:$DOCKER_TAG
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --ignore-unfixed $DOCKER_IMAGE_BACKEND:$DOCKER_TAG
+  needs:
+    - docker-build
+
+security_frontend:
+  stage: security
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - apk add --no-cache curl
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+    - echo "$DOCKERHUB_TOKEN" | docker login -u mohamed7any --password-stdin
+  script:
+    - docker pull $DOCKER_IMAGE_FRONTEND:$DOCKER_TAG
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --ignore-unfixed $DOCKER_IMAGE_FRONTEND:$DOCKER_TAG
+  needs:
+    - docker-build
+
+deploy:
+  stage: deploy
+  image: python:3.10-bullseye  
+  tags:
+    - docker
+  variables:
+    ANSIBLE_HOST_KEY_CHECKING: "False"
+  before_script:
+    - apt update && apt install -y rsync
+    - pip install ansible
+    - echo "$KEY_PEM" > key.pem
+    - chmod 600 key.pem
+    - mkdir -p ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile /dev/null" > ~/.ssh/config
+    - eval $(ssh-agent -s)
+    - ssh-add key.pem
+  script:
+    - echo "🟡 Testing SSH connection..."
+    - ssh mohamed@192.168.1.14 "echo '🟢 SSH OK!' && docker --version"
+    - echo "🚀 Running Ansible playbook..."
+    - script -q -c "ansible-playbook -vvv -i inventory deploy.yml"
+    - echo "✅ Deployment finished successfully!"
+  needs:
+    - docker-build
+    - security_backend
+    - security_frontend
+
+cleanup:
+  stage: cleanup
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker system prune -f --volumes
+  when: always
